@@ -90,7 +90,7 @@ function say(text){
   const u=new SpeechSynthesisUtterance(text);u.lang='es-ES';if(voice)u.voice=voice;u.pitch=.85;
   speaking=true;state('talk','Hablando');
   const done=()=>{if(!speaking)return;speaking=false;state('idle',awaiting?'Te escucho':idleText());if(active||awaiting)startRec()};
-  u.onend=done;u.onerror=done;speechSynthesis.speak(u);
+  u.onend=done;u.onerror=done;try{speechSynthesis.speak(u)}catch(e){done()}
 }
 let nLoop=false;
 async function nativeStart(){
@@ -151,6 +151,15 @@ function run(n,o){
   if(m=n.match(/^(?:recuerda|apunta|anota)(?: que)?\s+(.+)/)){const i=n.indexOf(m[1]);mem.push(o.slice(i).trim());store.set('jv.mem',mem);return say('Anotado, señor.')}
   if(/que recuerdas|que sabes de mi|mi memoria/.test(n))return say(mem.length?'Recuerdo esto: '+mem.join('. ')+'.':'Aún no me ha pedido recordar nada.');
   if(/olvida todo|borra la memoria/.test(n)){mem=[];store.set('jv.mem',mem);return say('Memoria borrada.')}
+  if(NATIVE&&(m=n.match(/^(?:abre|abrir|abreme|ejecuta|inicia|lanza)\s+(?:la\s+|el\s+)?(?:app\s+|aplicacion\s+)?(.+)/))){
+    const nm=m[1].trim();
+    openApp(nm).then(r=>{
+      if(r&&r.ok)return say('Abriendo '+r.label+'.');
+      if(WEB[nm]){openUrl('https://'+WEB[nm],nm);return say('Abriendo '+nm+'.')}
+      say('No encuentro una aplicación llamada '+nm+', señor.');
+    });
+    return;
+  }
   if(m=n.match(/(?:abre|abrir)\s+(youtube|google|maps|whatsapp|gmail|spotify|instagram|facebook|tiktok)/)){
     const u={youtube:'youtube.com',google:'google.com',maps:'maps.google.com',whatsapp:'web.whatsapp.com',gmail:'mail.google.com',spotify:'open.spotify.com',instagram:'instagram.com',facebook:'facebook.com',tiktok:'tiktok.com'}[m[1]];
     return say(openUrl('https://'+u,m[1])?'Abriendo '+m[1]+'.':'Toque el enlace para abrir '+m[1]+', señor.');
@@ -168,21 +177,26 @@ function getKey(force){
   if(!k||force){const v=window.prompt('Pega tu clave de API: Gemini (gratis) o Anthropic (sk-ant-)',k||'');if(v!==null&&v.trim()){k=v.trim();store.set('jv.key',k)}}
   return k;
 }
+async function openApp(name){
+  try{const AL=(Capacitor.Plugins&&Capacitor.Plugins.AppLauncher)||Capacitor.registerPlugin('AppLauncher');return await AL.open({name})}catch(e){return null}
+}
+const WEB={youtube:'youtube.com',google:'google.com',maps:'maps.google.com',whatsapp:'web.whatsapp.com',gmail:'mail.google.com',spotify:'open.spotify.com',instagram:'instagram.com',facebook:'facebook.com',tiktok:'tiktok.com'};
 function act(a){
   if(!a)return;
   if(a.type==='open'&&/^https?:\/\//.test(a.url))openUrl(a.url,a.url.replace(/^https?:\/\/(www\.)?/,'').split('/')[0]);
   else if(a.type==='timer'&&a.seconds>0)setTimeout(()=>say('Señor, '+(a.message||'se acabó el tiempo')+'.'),a.seconds*1000);
+  else if(a.type==='app'&&a.name)openApp(a.name).then(r=>{if(!(r&&r.ok))note('No encontré la aplicación '+a.name)});
   else if(a.type==='remember'&&a.text){mem.push(a.text);store.set('jv.mem',mem)}
 }
 async function ask(text){
   const key=getKey();
   if(!key)return say('Necesito su clave de API para pensar, señor. Toque el engranaje para ponerla.');
   state('think','Pensando…');
-  let prov='';
+  let prov='',reply=null,acts=[];
   const hist=chat.slice(-13,-1).map(m=>(m.who==='u'?'Señor: ':'Jarvis: ')+m.text).join('\n');
   const prompt='Eres Jarvis, el asistente personal por voz del señor (como el de Iron Man). Responde SIEMPRE en español, con trato respetuoso y breve (1 a 3 frases, se leerá en voz alta, sin markdown ni emojis), salvo que pida un resumen o algo largo: entonces sé completo pero compacto. Contesta cualquier pregunta o petición lo mejor que puedas; si te piden algo que no puedes hacer (llamar, enviar mensajes, controlar el teléfono), dilo con honestidad y ofrece la alternativa más cercana. '+
   'Fecha y hora actual: '+new Date().toLocaleString('es-ES')+'.\nCosas que el señor te pidió recordar: '+(mem.join('; ')||'ninguna')+'.\nConversación reciente:\n'+hist+'\n\nÚltima orden del señor: '+text+'\n\n'+
-  'Devuelve SOLO un JSON, sin texto extra ni bloques de código, con esta forma: {"reply":"lo que dirás en voz alta","actions":[]}. Acciones posibles dentro de actions: {"type":"open","url":"https://..."} para abrir una página, {"type":"timer","seconds":300,"message":"texto del aviso"} para un aviso, {"type":"remember","text":"dato"} para guardar algo en la memoria. Usa actions vacío si no hace falta ninguna.';
+  'Devuelve SOLO un JSON, sin texto extra ni bloques de código, con esta forma: {"reply":"lo que dirás en voz alta","actions":[]}. Acciones posibles dentro de actions: {"type":"open","url":"https://..."} para abrir una página, {"type":"timer","seconds":300,"message":"texto del aviso"} para un aviso, {"type":"remember","text":"dato"} para guardar algo en la memoria, {"type":"app","name":"Roblox"} para abrir cualquier aplicación instalada en el celular por su nombre (SÍ puedes abrir aplicaciones: usa esta acción y responde brevemente). Usa actions vacío si no hace falta ninguna.';
   try{
     const ant=key.startsWith('sk-ant');prov=ant?'Anthropic':'Google';
     const url=ant?'https://api.anthropic.com/v1/messages':'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent';
@@ -198,13 +212,16 @@ async function ask(text){
     if(!res.ok){const er=new Error((j.error&&j.error.message)||'error');er.status=res.status;throw er}
     const raw=ant?(j.content||[]).map(c=>c.text||'').join(''):(((j.candidates||[])[0]||{}).content||{parts:[]}).parts.map(p=>p.text||'').join('');
     let out;try{out=JSON.parse(raw.replace(/```json|```/g,'').trim())}catch(e){out={reply:raw}}
-    (out.actions||[]).forEach(act);
-    say(out.reply||'Hecho, señor.');
+    acts=out.actions||[];
+    reply=out.reply||'Hecho, señor.';
   }catch(e){
     const st=e&&e.status;
     if(e&&e.message)note((prov||'La IA')+' respondió: '+e.message);
     say(st===401||st===403||(st===400&&/api key/i.test(e.message))?'Su clave de API no es válida, señor. Toque el engranaje para cambiarla.':st===429?'Estoy recibiendo demasiadas órdenes, señor. Deme un momento.':st===503||st===500?'La IA de Google está saturada, señor. Inténtelo de nuevo en un momento.':st?'La IA devolvió un error. Vea el detalle en pantalla, señor.':'No logro conectarme a internet, señor.');
+    return;
   }
+  try{acts.forEach(act)}catch(e){}
+  say(reply);
 }
 function typed(){
   const v=inp.value.trim();if(!v)return;inp.value='';add('u',v);
