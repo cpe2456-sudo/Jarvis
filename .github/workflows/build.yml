@@ -25,7 +25,9 @@ jobs:
           echo '{"appId":"com.jarvis.asistente","appName":"Jarvis","webDir":"www","server":{"androidScheme":"https"},"plugins":{"CapacitorHttp":{"enabled":true}}}' > capacitor.config.json
           npx cap add android
           npx cap sync android
-          sed -i 's#</manifest>#<uses-permission android:name="android.permission.RECORD_AUDIO"/><queries><intent><action android:name="android.speech.RecognitionService"/></intent><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent></queries></manifest>#' android/app/src/main/AndroidManifest.xml
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's#</manifest>#<uses-permission android:name="android.permission.RECORD_AUDIO"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/><uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/><uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/><queries><intent><action android:name="android.speech.RecognitionService"/></intent><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent></queries></manifest>#' $M
+          sed -i 's#</application>#<service android:name=".JarvisService" android:exported="false" android:foregroundServiceType="microphone"/></application>#' $M
           D=android/app/src/main/java/com/jarvis/asistente
           cat > $D/AppLauncherPlugin.java <<'EOF'
           package com.jarvis.asistente;
@@ -96,9 +98,340 @@ jobs:
             }
           }
           EOF
+          cat > $D/BgPlugin.java <<'EOF'
+          package com.jarvis.asistente;
+
+          import android.Manifest;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.PowerManager;
+          import android.provider.Settings;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+
+          @CapacitorPlugin(name = "Bg")
+          public class BgPlugin extends Plugin {
+
+            @PluginMethod
+            public void start(PluginCall call) {
+              Context c = getContext();
+              JSObject r = new JSObject();
+              boolean needNotif = Build.VERSION.SDK_INT >= 33
+                  && ContextCompat.checkSelfPermission(c, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED;
+              if (needNotif) {
+                try {
+                  ActivityCompat.requestPermissions(getActivity(), new String[] {Manifest.permission.POST_NOTIFICATIONS}, 77);
+                } catch (Exception e) {
+                }
+              }
+              try {
+                ContextCompat.startForegroundService(c, new Intent(c, JarvisService.class));
+                r.put("started", true);
+              } catch (Exception e) {
+                r.put("started", false);
+                r.put("error", String.valueOf(e.getMessage()));
+              }
+              boolean overlay = Settings.canDrawOverlays(c);
+              PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
+              boolean battery = pm != null && pm.isIgnoringBatteryOptimizations(c.getPackageName());
+              r.put("needNotif", needNotif);
+              r.put("needOverlay", !overlay);
+              r.put("needBattery", !battery);
+              if (!needNotif) {
+                Intent i = null;
+                if (!overlay) {
+                  i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + c.getPackageName()));
+                } else if (!battery) {
+                  i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + c.getPackageName()));
+                }
+                if (i != null) {
+                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                  try {
+                    c.startActivity(i);
+                  } catch (Exception e) {
+                  }
+                }
+              }
+              call.resolve(r);
+            }
+
+            @PluginMethod
+            public void stop(PluginCall call) {
+              Context c = getContext();
+              c.stopService(new Intent(c, JarvisService.class));
+              call.resolve();
+            }
+
+            @PluginMethod
+            public void take(PluginCall call) {
+              JSObject r = new JSObject();
+              r.put("pending", JarvisService.hasPending);
+              r.put("cmd", JarvisService.pending == null ? "" : JarvisService.pending);
+              JarvisService.hasPending = false;
+              JarvisService.pending = "";
+              call.resolve(r);
+            }
+          }
+          EOF
+          cat > $D/JarvisService.java <<'EOF'
+          package com.jarvis.asistente;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.speech.RecognitionListener;
+          import android.speech.RecognizerIntent;
+          import android.speech.SpeechRecognizer;
+          import java.text.Normalizer;
+          import java.util.ArrayList;
+          import java.util.Locale;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
+
+          public class JarvisService extends Service {
+
+            static JarvisService inst = null;
+            static volatile boolean paused = false;
+            static volatile boolean hasPending = false;
+            static volatile String pending = "";
+
+            private static final Pattern WAKE =
+                Pattern.compile("\\b(jarvis|yarvis|yarbis|jarbis|charvis|jarvi|yarvi|jervis|yervis)\\b");
+
+            private final Handler h = new Handler(Looper.getMainLooper());
+            private final Runnable loop = this::startListening;
+            private SpeechRecognizer sr = null;
+            private Intent recIntent;
+            private boolean running = false;
+
+            static String norm(String s) {
+              String t = Normalizer.normalize(s.toLowerCase(Locale.ROOT), Normalizer.Form.NFD);
+              return t.replaceAll("\\p{M}", "");
+            }
+
+            static void setPaused(final boolean p) {
+              paused = p;
+              final JarvisService s = inst;
+              if (s == null) return;
+              s.h.post(new Runnable() {
+                public void run() {
+                  if (p) {
+                    s.h.removeCallbacks(s.loop);
+                    s.destroyRec();
+                  } else {
+                    s.later(600);
+                  }
+                }
+              });
+            }
+
+            @Override
+            public void onCreate() {
+              super.onCreate();
+              inst = this;
+              channels();
+              try {
+                Notification n = ongoing();
+                if (Build.VERSION.SDK_INT >= 29) {
+                  startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+                } else {
+                  startForeground(1, n);
+                }
+              } catch (Exception e) {
+                stopSelf();
+                return;
+              }
+              running = true;
+              recIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+              recIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+              recIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-ES");
+              recIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
+              h.post(loop);
+            }
+
+            @Override
+            public int onStartCommand(Intent i, int flags, int startId) {
+              if (i != null && "STOP".equals(i.getAction())) {
+                stopSelf();
+              }
+              return START_NOT_STICKY;
+            }
+
+            @Override
+            public void onDestroy() {
+              running = false;
+              h.removeCallbacksAndMessages(null);
+              destroyRec();
+              inst = null;
+              super.onDestroy();
+            }
+
+            @Override
+            public IBinder onBind(Intent i) {
+              return null;
+            }
+
+            void later(long ms) {
+              if (!running) return;
+              h.removeCallbacks(loop);
+              h.postDelayed(loop, ms);
+            }
+
+            void destroyRec() {
+              if (sr != null) {
+                try {
+                  sr.cancel();
+                  sr.destroy();
+                } catch (Exception e) {
+                }
+                sr = null;
+              }
+            }
+
+            void startListening() {
+              if (!running || paused) return;
+              try {
+                if (sr == null) {
+                  sr = SpeechRecognizer.createSpeechRecognizer(this);
+                  sr.setRecognitionListener(new Listener());
+                }
+                sr.startListening(recIntent);
+              } catch (Exception e) {
+                destroyRec();
+                later(2500);
+              }
+            }
+
+            void wake(String rest) {
+              pending = rest;
+              hasPending = true;
+              paused = true;
+              destroyRec();
+              try {
+                Intent i = new Intent(this, MainActivity.class);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                startActivity(i);
+              } catch (Exception e) {
+              }
+              h.postDelayed(new Runnable() {
+                public void run() {
+                  if (hasPending) wakeNotif();
+                }
+              }, 1500);
+              h.postDelayed(new Runnable() {
+                public void run() {
+                  if (hasPending) {
+                    hasPending = false;
+                    pending = "";
+                    paused = false;
+                    later(300);
+                  }
+                }
+              }, 9000);
+            }
+
+            class Listener implements RecognitionListener {
+              public void onReadyForSpeech(Bundle b) {}
+              public void onBeginningOfSpeech() {}
+              public void onRmsChanged(float v) {}
+              public void onBufferReceived(byte[] b) {}
+              public void onEndOfSpeech() {}
+              public void onPartialResults(Bundle b) {}
+              public void onEvent(int t, Bundle b) {}
+
+              public void onError(int e) {
+                if (e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || e == SpeechRecognizer.ERROR_CLIENT) {
+                  destroyRec();
+                  later(1500);
+                } else {
+                  later(300);
+                }
+              }
+
+              public void onResults(Bundle b) {
+                ArrayList<String> m = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                if (m != null) {
+                  for (String s : m) {
+                    String n = norm(s);
+                    Matcher mt = WAKE.matcher(n);
+                    if (mt.find()) {
+                      wake(n.substring(mt.end()).trim());
+                      return;
+                    }
+                  }
+                }
+                later(250);
+              }
+            }
+
+            private void channels() {
+              if (Build.VERSION.SDK_INT < 26) return;
+              NotificationManager nm = getSystemService(NotificationManager.class);
+              nm.createNotificationChannel(new NotificationChannel("jarvis_bg", "Jarvis escuchando", NotificationManager.IMPORTANCE_LOW));
+              nm.createNotificationChannel(new NotificationChannel("jarvis_wake", "Jarvis avisos", NotificationManager.IMPORTANCE_HIGH));
+            }
+
+            private Notification.Builder builder(String ch) {
+              if (Build.VERSION.SDK_INT >= 26) return new Notification.Builder(this, ch);
+              return new Notification.Builder(this);
+            }
+
+            private PendingIntent openApp() {
+              Intent i = new Intent(this, MainActivity.class);
+              i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+              return PendingIntent.getActivity(this, 0, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+            }
+
+            private Notification ongoing() {
+              Intent s = new Intent(this, JarvisService.class);
+              s.setAction("STOP");
+              PendingIntent sp = PendingIntent.getService(this, 1, s, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+              return builder("jarvis_bg")
+                  .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                  .setContentTitle("Jarvis escuchando")
+                  .setContentText("Di Jarvis desde cualquier app")
+                  .setContentIntent(openApp())
+                  .addAction(0, "Detener", sp)
+                  .setOngoing(true)
+                  .build();
+            }
+
+            private void wakeNotif() {
+              NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+              if (nm == null) return;
+              Notification.Builder b = builder("jarvis_wake")
+                  .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                  .setContentTitle("Jarvis")
+                  .setContentText("Toca para hablar con Jarvis")
+                  .setContentIntent(openApp())
+                  .setFullScreenIntent(openApp(), true)
+                  .setAutoCancel(true);
+              if (Build.VERSION.SDK_INT < 26) b.setPriority(Notification.PRIORITY_HIGH);
+              nm.notify(2, b.build());
+            }
+          }
+          EOF
           cat > $D/MainActivity.java <<'EOF'
           package com.jarvis.asistente;
 
+          import android.app.NotificationManager;
           import android.os.Bundle;
           import com.getcapacitor.BridgeActivity;
 
@@ -106,7 +439,38 @@ jobs:
             @Override
             public void onCreate(Bundle savedInstanceState) {
               registerPlugin(AppLauncherPlugin.class);
+              registerPlugin(BgPlugin.class);
               super.onCreate(savedInstanceState);
+            }
+
+            @Override
+            public void onResume() {
+              super.onResume();
+              JarvisService.setPaused(true);
+              try {
+                NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                if (nm != null) nm.cancel(2);
+              } catch (Exception e) {
+              }
+              try {
+                final android.webkit.WebView wv = getBridge().getWebView();
+                wv.postDelayed(new Runnable() {
+                  public void run() {
+                    wv.evaluateJavascript("window.jvHide&&jvHide(false);setTimeout(function(){window.jvWake&&jvWake()},500)", null);
+                  }
+                }, 400);
+              } catch (Exception e) {
+              }
+            }
+
+            @Override
+            public void onPause() {
+              super.onPause();
+              JarvisService.setPaused(false);
+              try {
+                getBridge().getWebView().evaluateJavascript("window.jvHide&&jvHide(true)", null);
+              } catch (Exception e) {
+              }
             }
           }
           EOF
