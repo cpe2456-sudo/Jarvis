@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Jarvis</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600&display=swap">
+<style>
+:root{color-scheme:dark;--bg:#050b18;--line:#17426b;--cyan:#3be8ff;--text:#d7f3ff;--dim:#7fa6bd;--warn:#ffb347;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){color-scheme:light;--bg:#eaf6fb;--line:#9cc7dc;--cyan:#0086a8;--text:#06243a;--dim:#4d7289;--warn:#a85d00}}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#050b18;--line:#17426b;--cyan:#3be8ff;--text:#d7f3ff;--dim:#7fa6bd;--warn:#ffb347}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:Rajdhani,"Segoe UI",system-ui,sans-serif;font-size:18px}
+#app{height:100%;display:flex;flex-direction:column;max-width:640px;margin:0 auto}
+h1{margin:.6rem 0 0;text-align:center;font-weight:600;font-size:1.5rem;letter-spacing:.35em;text-indent:.35em;color:var(--cyan)}
+#orb{display:block;width:min(52vw,220px);height:auto;margin:.4rem auto 0;cursor:pointer;-webkit-tap-highlight-color:transparent;outline-offset:6px}
+#orb:focus-visible{outline:2px solid var(--cyan)}
+#orb circle{fill:none}
+.r1{stroke:var(--line);stroke-width:2;stroke-dasharray:4 10;animation:spin 40s linear infinite}
+.r2{stroke:var(--cyan);stroke-width:3;stroke-dasharray:90 30;animation:spin 14s linear infinite reverse}
+.r3{stroke:var(--cyan);stroke-width:1;opacity:.45}
+.core{fill:url(#g)!important;animation:beat 3.2s ease-in-out infinite}
+#orb[data-s=listen] .r2{animation-duration:3s}
+#orb[data-s=listen] .core{animation-duration:1.2s}
+#orb[data-s=talk] .core{animation-duration:.5s}
+#orb[data-s=think] .r2{animation-duration:1.2s}
+#orb[data-s=think] .core{animation-duration:.8s}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes beat{50%{transform:scale(1.18)}}
+@media (prefers-reduced-motion:reduce){#orb *{animation:none!important}}
+#stat{text-align:center;color:var(--dim);margin:.2rem 0 .4rem;min-height:1.4em}
+#log{flex:1;overflow-y:auto;padding:0 1rem;border-top:1px solid var(--line)}
+.m{max-width:85%;margin:.45rem 0;padding:.3rem .7rem;line-height:1.3;font-size:1.05rem}
+.u{margin-left:auto;text-align:right;color:var(--dim)}
+.j{border-left:2px solid var(--cyan)}
+.w{border-left:2px solid var(--warn);color:var(--warn)}
+.m a{color:var(--cyan);font-weight:600}
+#bar{display:flex;gap:.6rem;align-items:center;padding:.6rem 1rem;border-top:1px solid var(--line)}
+#inp{flex:1;min-width:0;background:transparent;border:0;border-bottom:1px solid var(--cyan);color:var(--text);font:inherit;font-size:16px;padding:.4rem 0;outline:none}
+button{background:transparent;border:1px solid var(--cyan);color:var(--cyan);font:inherit;padding:.35rem .8rem;border-radius:3px}
+button:focus-visible,#inp:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+#opt{display:flex;justify-content:center;padding:.3rem 0 .5rem;color:var(--dim);font-size:.95rem}
+#opt label{display:flex;gap:.5rem;align-items:center}
+#opt input{accent-color:var(--cyan);width:1.1rem;height:1.1rem}
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Jarvis</h1>
+  <svg id="orb" viewBox="-100 -100 200 200" role="button" tabindex="0" aria-label="Hablar con Jarvis" data-s="idle">
+    <defs><radialGradient id="g"><stop offset="0" style="stop-color:#fff"/><stop offset=".35" style="stop-color:var(--cyan)"/><stop offset="1" style="stop-color:var(--cyan);stop-opacity:0"/></radialGradient></defs>
+    <circle class="r1" r="92"/><circle class="r2" r="76"/><circle class="r3" r="58"/><circle class="core" r="34"/>
+  </svg>
+  <div id="stat">En reposo</div>
+  <div id="log" aria-live="polite"></div>
+  <div id="opt"><label><input type="checkbox" id="sw"> Escucha activa: di “Jarvis”</label></div>
+  <div id="bar"><input id="inp" placeholder="Escribe una orden…" autocomplete="off"><button id="cfg" aria-label="Clave de API">⚙</button><button id="send">Enviar</button></div>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+const log=$('#log'),stat=$('#stat'),orb=$('#orb'),inp=$('#inp'),sw=$('#sw');
+const store={get(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+let chat=store.get('jv.chat',[]),mem=store.get('jv.mem',[]);
+function state(s,t){orb.dataset.s=s;stat.textContent=t}
+function add(who,text,save=true){const d=document.createElement('div');d.className='m '+who;d.textContent=text;log.appendChild(d);log.scrollTop=log.scrollHeight;if(save&&who!=='w'){chat.push({who,text});chat=chat.slice(-100);store.set('jv.chat',chat)}}
+const note=t=>add('w',t,false);
+function openUrl(url,label){
+  if(NATIVE){location.href=url;return true}
+  let w=null;try{w=window.open(url,'_blank')}catch(e){}
+  if(w)return true;
+  const d=document.createElement('div');d.className='m j';
+  const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.textContent='Abrir '+label;
+  d.appendChild(a);log.appendChild(d);log.scrollTop=log.scrollHeight;return false;
+}
+chat.forEach(m=>add(m.who,m.text,false));
+if(!chat.length)add('j','A su servicio, señor. Toque el círculo o escriba una orden.');
+
+const NATIVE=!!(window.Capacitor&&Capacitor.isNativePlatform&&Capacitor.isNativePlatform());
+const NSR=NATIVE?((Capacitor.Plugins&&Capacitor.Plugins.SpeechRecognition)||Capacitor.registerPlugin('SpeechRecognition')):null;
+const SR=NATIVE?true:(window.SpeechRecognition||window.webkitSpeechRecognition);
+const TTS='speechSynthesis' in window;
+let voice=null,speaking=false,rec=null,active=false,awaiting=false,awaitT=null;
+function pick(){voice=speechSynthesis.getVoices().find(v=>/^es[-_]/i.test(v.lang))||null}
+if(TTS){pick();speechSynthesis.onvoiceschanged=pick}
+const idleText=()=>active?'Esperando “Jarvis”':'En reposo';
+
+function say(text){
+  add('j',text);
+  if(!TTS){state('idle',idleText());return}
+  speechSynthesis.cancel();stopRec();
+  const u=new SpeechSynthesisUtterance(text);u.lang='es-ES';if(voice)u.voice=voice;u.pitch=.85;
+  speaking=true;state('talk','Hablando');
+  const done=()=>{if(!speaking)return;speaking=false;state('idle',awaiting?'Te escucho':idleText());if(active||awaiting)startRec()};
+  u.onend=done;u.onerror=done;speechSynthesis.speak(u);
+}
+let nLoop=false;
+async function nativeStart(){
+  if(nLoop||speaking)return;
+  nLoop=true;
+  try{
+    const p=await (NSR.requestPermissions?NSR.requestPermissions():NSR.requestPermission());
+    if(p&&p.speechRecognition==='denied'){active=false;awaiting=false;sw.checked=false;nLoop=false;state('idle','En reposo');note('Sin permiso de micrófono. Actívalo en Ajustes > Apps > Jarvis > Permisos.');return}
+  }catch(e){}
+  state('listen',awaiting?'Te escucho':idleText());
+  while((active||awaiting)&&!speaking){
+    try{
+      const r=await NSR.start({language:'es-ES',maxResults:1,partialResults:false,popup:false});
+      const t=r&&r.matches&&r.matches[0];
+      if(t&&!speaking)heard(t.trim());
+    }catch(e){await new Promise(z=>setTimeout(z,700))}
+  }
+  nLoop=false;
+}
+function startRec(){
+  if(NATIVE)return nativeStart();
+  if(!SR||rec||speaking)return;
+  const r=rec=new SR();r.lang='es-ES';r.continuous=true;r.interimResults=false;
+  r.onresult=e=>{for(let i=e.resultIndex;i<e.results.length;i++)if(e.results[i].isFinal)heard(e.results[i][0].transcript.trim())};
+  r.onerror=e=>{if(e.error==='not-allowed'||e.error==='service-not-allowed'){active=false;awaiting=false;sw.checked=false;state('idle','En reposo');note('Sin permiso de micrófono. Actívalo en los ajustes del navegador y vuelve a intentarlo.')}};
+  r.onend=()=>{if(rec===r)rec=null;if((active||awaiting)&&!speaking)setTimeout(startRec,300)};
+  try{r.start();state('listen',awaiting?'Te escucho':idleText())}catch(e){rec=null}
+}
+function stopRec(){if(NATIVE){try{NSR.stop()}catch(e){}return}if(rec){const r=rec;rec=null;r.onend=null;try{r.abort()}catch(e){}}}
+function listenOnce(){
+  awaiting=true;clearTimeout(awaitT);
+  awaitT=setTimeout(()=>{if(awaiting){awaiting=false;if(!active)stopRec();state('idle',idleText())}},10000);
+  startRec();
+}
+const norm=s=>s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[¿?¡!.,;:]/g,' ');
+
+function heard(t){
+  const n=norm(t);
+  if(awaiting){awaiting=false;clearTimeout(awaitT);add('u',t);if(!active)stopRec();return run(n,t)}
+  const m=n.match(/\b(jarvis|yarvis|yarbis|jarbis|charvis)\b/);
+  if(!m)return;
+  add('u',t);
+  const k=m.index+m[0].length,rn=n.slice(k).trim();
+  if(rn.length>2)return run(rn,t.slice(k).trim());
+  say('Mande señor');listenOnce();
+}
+function run(n,o){
+  let m;
+  if(/^(hola|buenas|buenos dias|buenas tardes|buenas noches)/.test(n))return say('A su servicio, señor.');
+  if(/quien eres|como te llamas/.test(n))return say('Soy Jarvis, su asistente personal.');
+  if(/que hora|la hora/.test(n))return say('Son las '+new Date().toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'})+', señor.');
+  if(/que dia|la fecha|dia es hoy/.test(n))return say('Hoy es '+new Date().toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long',year:'numeric'})+'.');
+  if(/temporizador|alarma|avisame|cuenta atras/.test(n)&&(m=n.match(/(\d+)\s*(segundo|minuto|hora)/))){
+    const k=+m[1],u=m[2]+(k>1?'s':''),ms=k*{segundo:1e3,minuto:6e4,hora:36e5}[m[2]];
+    setTimeout(()=>say('Señor, han pasado '+k+' '+u+'.'),ms);
+    return say('Listo, le aviso en '+k+' '+u+'. Mantenga esta pantalla abierta.');
+  }
+  if(m=n.match(/^(?:recuerda|apunta|anota)(?: que)?\s+(.+)/)){const i=n.indexOf(m[1]);mem.push(o.slice(i).trim());store.set('jv.mem',mem);return say('Anotado, señor.')}
+  if(/que recuerdas|que sabes de mi|mi memoria/.test(n))return say(mem.length?'Recuerdo esto: '+mem.join('. ')+'.':'Aún no me ha pedido recordar nada.');
+  if(/olvida todo|borra la memoria/.test(n)){mem=[];store.set('jv.mem',mem);return say('Memoria borrada.')}
+  if(m=n.match(/(?:abre|abrir)\s+(youtube|google|maps|whatsapp|gmail|spotify|instagram|facebook|tiktok)/)){
+    const u={youtube:'youtube.com',google:'google.com',maps:'maps.google.com',whatsapp:'web.whatsapp.com',gmail:'mail.google.com',spotify:'open.spotify.com',instagram:'instagram.com',facebook:'facebook.com',tiktok:'tiktok.com'}[m[1]];
+    return say(openUrl('https://'+u,m[1])?'Abriendo '+m[1]+'.':'Toque el enlace para abrir '+m[1]+', señor.');
+  }
+  if(m=n.match(/^(?:busca|buscar|googlea|investiga)\s+(.+)/)){const q=m[1].trim();return say(openUrl('https://www.google.com/search?q='+encodeURIComponent(q),'la búsqueda')?'Buscando '+q+'.':'Toque el enlace para ver la búsqueda de '+q+', señor.')}
+  if(m=n.match(/cuanto es\s+(.+)/)){
+    const e=m[1].replace(/ mas /g,'+').replace(/ menos /g,'-').replace(/ por | x /g,'*').replace(/ entre | dividido /g,'/').replace(/\s/g,'');
+    if(/^[\d+\-*\/.()]+$/.test(e)){try{const r=Function('"use strict";return ('+e+')')();if(isFinite(r))return say('El resultado es '+Math.round(r*1e4)/1e4+'.')}catch(x){}}
+  }
+  ask(o||n);
+}
+const MODEL='claude-haiku-5-5';
+function getKey(force){
+  let k=store.get('jv.key','');
+  if(!k||force){const v=window.prompt('Pega tu clave de API de Anthropic (empieza por sk-ant-)',k||'');if(v!==null&&v.trim()){k=v.trim();store.set('jv.key',k)}}
+  return k;
+}
+function act(a){
+  if(!a)return;
+  if(a.type==='open'&&/^https?:\/\//.test(a.url))openUrl(a.url,a.url.replace(/^https?:\/\/(www\.)?/,'').split('/')[0]);
+  else if(a.type==='timer'&&a.seconds>0)setTimeout(()=>say('Señor, '+(a.message||'se acabó el tiempo')+'.'),a.seconds*1000);
+  else if(a.type==='remember'&&a.text){mem.push(a.text);store.set('jv.mem',mem)}
+}
+async function ask(text){
+  const key=getKey();
+  if(!key)return say('Necesito su clave de API para pensar, señor. Toque el engranaje para ponerla.');
+  state('think','Pensando…');
+  const hist=chat.slice(-13,-1).map(m=>(m.who==='u'?'Señor: ':'Jarvis: ')+m.text).join('\n');
+  const prompt='Eres Jarvis, el asistente personal por voz del señor (como el de Iron Man). Responde SIEMPRE en español, con trato respetuoso y breve (1 a 3 frases, se leerá en voz alta, sin markdown ni emojis), salvo que pida un resumen o algo largo: entonces sé completo pero compacto. Contesta cualquier pregunta o petición lo mejor que puedas; si te piden algo que no puedes hacer (llamar, enviar mensajes, controlar el teléfono), dilo con honestidad y ofrece la alternativa más cercana. '+
+  'Fecha y hora actual: '+new Date().toLocaleString('es-ES')+'.\nCosas que el señor te pidió recordar: '+(mem.join('; ')||'ninguna')+'.\nConversación reciente:\n'+hist+'\n\nÚltima orden del señor: '+text+'\n\n'+
+  'Devuelve SOLO un JSON, sin texto extra ni bloques de código, con esta forma: {"reply":"lo que dirás en voz alta","actions":[]}. Acciones posibles dentro de actions: {"type":"open","url":"https://..."} para abrir una página, {"type":"timer","seconds":300,"message":"texto del aviso"} para un aviso, {"type":"remember","text":"dato"} para guardar algo en la memoria. Usa actions vacío si no hace falta ninguna.';
+  try{
+    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:MODEL,max_tokens:800,messages:[{role:'user',content:prompt}]})});
+    const j=await res.json();
+    if(!res.ok){const er=new Error((j.error&&j.error.message)||'error');er.status=res.status;throw er}
+    const raw=(j.content||[]).map(c=>c.text||'').join('');
+    let out;try{out=JSON.parse(raw.replace(/```json|```/g,'').trim())}catch(e){out={reply:raw}}
+    (out.actions||[]).forEach(act);
+    say(out.reply||'Hecho, señor.');
+  }catch(e){
+    const st=e&&e.status;
+    say(st===401?'Su clave de API no es válida, señor. Toque el engranaje para cambiarla.':st===429?'Estoy recibiendo demasiadas órdenes, señor. Deme un momento.':st?'La IA devolvió un error: '+e.message:'No logro conectarme a internet, señor.');
+  }
+}
+function typed(){
+  const v=inp.value.trim();if(!v)return;inp.value='';add('u',v);
+  const n=norm(v),m=n.match(/^\s*jarvis\b/);
+  m?run(n.slice(m[0].length).trim()||'hola',v.slice(m[0].length).trim()):run(n,v);
+}
+$('#send').onclick=typed;
+$('#cfg').onclick=()=>getKey(true);
+inp.onkeydown=e=>{if(e.key==='Enter')typed()};
+orb.onclick=()=>{
+  if(!SR)return note('Este navegador no reconoce voz. Usa Chrome en Android, o escribe tus órdenes.');
+  if(TTS)speechSynthesis.cancel();
+  stopRec();state('listen','Te escucho');listenOnce();
+};
+orb.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();orb.onclick()}};
+sw.onchange=()=>{
+  if(sw.checked){
+    if(!SR){sw.checked=false;return note('Este navegador no reconoce voz. Usa Chrome en Android.')}
+    active=true;startRec();note('La escucha activa funciona con la app abierta. En segundo plano llegará en la siguiente etapa.');
+  }else{active=false;if(!awaiting)stopRec();state('idle','En reposo')}
+};
+</script>
+</body>
+</html>
