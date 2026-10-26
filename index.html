@@ -165,7 +165,7 @@ function run(n,o){
 const MODEL='claude-haiku-5-5';
 function getKey(force){
   let k=store.get('jv.key','');
-  if(!k||force){const v=window.prompt('Pega tu clave de API de Anthropic (empieza por sk-ant-)',k||'');if(v!==null&&v.trim()){k=v.trim();store.set('jv.key',k)}}
+  if(!k||force){const v=window.prompt('Pega tu clave de API: Gemini (gratis) o Anthropic (sk-ant-)',k||'');if(v!==null&&v.trim()){k=v.trim();store.set('jv.key',k)}}
   return k;
 }
 function act(a){
@@ -178,21 +178,27 @@ async function ask(text){
   const key=getKey();
   if(!key)return say('Necesito su clave de API para pensar, señor. Toque el engranaje para ponerla.');
   state('think','Pensando…');
+  let prov='';
   const hist=chat.slice(-13,-1).map(m=>(m.who==='u'?'Señor: ':'Jarvis: ')+m.text).join('\n');
   const prompt='Eres Jarvis, el asistente personal por voz del señor (como el de Iron Man). Responde SIEMPRE en español, con trato respetuoso y breve (1 a 3 frases, se leerá en voz alta, sin markdown ni emojis), salvo que pida un resumen o algo largo: entonces sé completo pero compacto. Contesta cualquier pregunta o petición lo mejor que puedas; si te piden algo que no puedes hacer (llamar, enviar mensajes, controlar el teléfono), dilo con honestidad y ofrece la alternativa más cercana. '+
   'Fecha y hora actual: '+new Date().toLocaleString('es-ES')+'.\nCosas que el señor te pidió recordar: '+(mem.join('; ')||'ninguna')+'.\nConversación reciente:\n'+hist+'\n\nÚltima orden del señor: '+text+'\n\n'+
   'Devuelve SOLO un JSON, sin texto extra ni bloques de código, con esta forma: {"reply":"lo que dirás en voz alta","actions":[]}. Acciones posibles dentro de actions: {"type":"open","url":"https://..."} para abrir una página, {"type":"timer","seconds":300,"message":"texto del aviso"} para un aviso, {"type":"remember","text":"dato"} para guardar algo en la memoria. Usa actions vacío si no hace falta ninguna.';
   try{
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:MODEL,max_tokens:800,messages:[{role:'user',content:prompt}]})});
+    const ant=key.startsWith('sk-ant');prov=ant?'Anthropic':'Google';
+    const url=ant?'https://api.anthropic.com/v1/messages':'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent';
+    const opts=ant?{method:'POST',headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:MODEL,max_tokens:800,messages:[{role:'user',content:prompt}]})}
+      :{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':key},body:JSON.stringify({contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:2000,responseMimeType:'application/json'}})};
+    const res=await fetch(url,opts);
     const j=await res.json();
     if(!res.ok){const er=new Error((j.error&&j.error.message)||'error');er.status=res.status;throw er}
-    const raw=(j.content||[]).map(c=>c.text||'').join('');
+    const raw=ant?(j.content||[]).map(c=>c.text||'').join(''):(((j.candidates||[])[0]||{}).content||{parts:[]}).parts.map(p=>p.text||'').join('');
     let out;try{out=JSON.parse(raw.replace(/```json|```/g,'').trim())}catch(e){out={reply:raw}}
     (out.actions||[]).forEach(act);
     say(out.reply||'Hecho, señor.');
   }catch(e){
     const st=e&&e.status;
-    say(st===401?'Su clave de API no es válida, señor. Toque el engranaje para cambiarla.':st===429?'Estoy recibiendo demasiadas órdenes, señor. Deme un momento.':st?'La IA devolvió un error: '+e.message:'No logro conectarme a internet, señor.');
+    if(e&&e.message)note((prov||'La IA')+' respondió: '+e.message);
+    say(st===401||st===403||(st===400&&/api key/i.test(e.message))?'Su clave de API no es válida, señor. Toque el engranaje para cambiarla.':st===429?'Estoy recibiendo demasiadas órdenes, señor. Deme un momento.':st?'La IA devolvió un error: '+e.message:'No logro conectarme a internet, señor.');
   }
 }
 function typed(){
