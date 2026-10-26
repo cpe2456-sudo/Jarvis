@@ -92,16 +92,16 @@ function say(text){
   const done=()=>{if(!speaking)return;speaking=false;state('idle',awaiting?'Te escucho':idleText());if(active||awaiting)startRec()};
   u.onend=done;u.onerror=done;try{speechSynthesis.speak(u)}catch(e){done()}
 }
-let nLoop=false;
+let nLoop=false,HIDDEN=false;
 async function nativeStart(){
-  if(nLoop||speaking)return;
+  if(nLoop||speaking||HIDDEN)return;
   nLoop=true;
   try{
     const p=await (NSR.requestPermissions?NSR.requestPermissions():NSR.requestPermission());
     if(p&&p.speechRecognition==='denied'){active=false;awaiting=false;sw.checked=false;nLoop=false;state('idle','En reposo');note('Sin permiso de micrófono. Actívalo en Ajustes > Apps > Jarvis > Permisos.');return}
   }catch(e){}
   state('listen',awaiting?'Te escucho':idleText());
-  while((active||awaiting)&&!speaking){
+  while((active||awaiting)&&!speaking&&!HIDDEN){
     try{
       const r=await NSR.start({language:'es-ES',maxResults:1,partialResults:false,popup:false});
       const t=r&&r.matches&&r.matches[0];
@@ -237,12 +237,43 @@ orb.onclick=()=>{
   stopRec();state('listen','Te escucho');listenOnce();
 };
 orb.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();orb.onclick()}};
-sw.onchange=()=>{
+const getBg=()=>(Capacitor.Plugins&&Capacitor.Plugins.Bg)||Capacitor.registerPlugin('Bg');
+sw.onchange=async()=>{
   if(sw.checked){
     if(!SR){sw.checked=false;return note('Este navegador no reconoce voz. Usa Chrome en Android.')}
-    active=true;startRec();note('La escucha activa funciona con la app abierta. En segundo plano llegará en la siguiente etapa.');
-  }else{active=false;if(!awaiting)stopRec();state('idle','En reposo')}
+    active=true;
+    if(NATIVE){
+      try{await NSR.requestPermissions()}catch(e){}
+      try{
+        const r=await getBg().start();
+        if(r&&r.needNotif)note('Permita las notificaciones de Jarvis y luego apague y encienda este interruptor.');
+        else if(r&&r.needOverlay)note('Active «Mostrar sobre otras apps» para Jarvis, regrese y apague y encienda este interruptor.');
+        else if(r&&r.needBattery)note('Permita que Jarvis no tenga restricciones de batería, para que siga escuchando.');
+        else note('Listo, señor: diga «Jarvis» desde cualquier app.');
+      }catch(e){note('No pude iniciar la escucha en segundo plano.')}
+    }
+    startRec();
+  }else{
+    active=false;
+    if(NATIVE){try{getBg().stop()}catch(e){}}
+    if(!awaiting)stopRec();state('idle','En reposo');
+  }
 };
+function jvHide(h){HIDDEN=h;if(h){stopRec()}else if(active||awaiting){startRec()}}
+window.jvHide=jvHide;
+document.addEventListener('visibilitychange',()=>jvHide(document.hidden));
+async function jvWake(){
+  if(!NATIVE)return;
+  try{
+    const r=await getBg().take();
+    if(!r||!r.pending)return;
+    const c=(r.cmd||'').trim();
+    if(c.length>2){add('u',c);run(c,c)}else{say('Mande señor');listenOnce()}
+  }catch(e){}
+}
+window.jvWake=jvWake;
+setTimeout(jvWake,1200);
+
 </script>
 </body>
 </html>
