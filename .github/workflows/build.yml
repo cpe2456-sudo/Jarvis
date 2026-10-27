@@ -26,7 +26,7 @@ jobs:
           npx cap add android
           npx cap sync android
           M=android/app/src/main/AndroidManifest.xml
-          sed -i 's#</manifest>#<uses-permission android:name="android.permission.RECORD_AUDIO"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/><uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/><uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/><queries><intent><action android:name="android.speech.RecognitionService"/></intent><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent></queries></manifest>#' $M
+          sed -i 's#</manifest>#<uses-permission android:name="android.permission.RECORD_AUDIO"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/><uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/><uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/><uses-permission android:name="com.android.alarm.permission.SET_ALARM"/><queries><intent><action android:name="android.speech.RecognitionService"/></intent><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent><intent><action android:name="android.intent.action.TTS_SERVICE"/></intent></queries></manifest>#' $M
           sed -i 's#</application>#<service android:name=".JarvisService" android:exported="false" android:foregroundServiceType="microphone"/></application>#' $M
           D=android/app/src/main/java/com/jarvis/asistente
           cat > $D/AppLauncherPlugin.java <<'EOF'
@@ -98,12 +98,61 @@ jobs:
             }
           }
           EOF
+          cat > $D/Apps.java <<'EOF'
+          package com.jarvis.asistente;
+
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import java.text.Normalizer;
+          import java.util.List;
+          import java.util.Locale;
+
+          public class Apps {
+
+            static String norm(String s) {
+              String t = Normalizer.normalize(s.toLowerCase(Locale.ROOT), Normalizer.Form.NFD);
+              return t.replaceAll("[^a-z0-9 ]", "").trim();
+            }
+
+            static String launch(Context c, String name) {
+              String q = norm(name == null ? "" : name);
+              if (q.isEmpty()) return null;
+              PackageManager pm = c.getPackageManager();
+              Intent main = new Intent(Intent.ACTION_MAIN, null);
+              main.addCategory(Intent.CATEGORY_LAUNCHER);
+              List<ResolveInfo> list = pm.queryIntentActivities(main, 0);
+              ResolveInfo best = null;
+              int score = 0;
+              for (ResolveInfo ri : list) {
+                String label = norm(ri.loadLabel(pm).toString());
+                if (label.isEmpty()) continue;
+                int sc = 0;
+                if (label.equals(q)) sc = 3;
+                else if (label.startsWith(q) || (label.length() > 2 && q.startsWith(label))) sc = 2;
+                else if (label.contains(q) || (label.length() > 2 && q.contains(label))) sc = 1;
+                if (sc > score) {
+                  score = sc;
+                  best = ri;
+                }
+              }
+              if (best == null) return null;
+              Intent i = pm.getLaunchIntentForPackage(best.activityInfo.packageName);
+              if (i == null) return null;
+              i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+              c.startActivity(i);
+              return best.loadLabel(pm).toString();
+            }
+          }
+          EOF
           cat > $D/BgPlugin.java <<'EOF'
           package com.jarvis.asistente;
 
           import android.Manifest;
           import android.content.Context;
           import android.content.Intent;
+          import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
           import android.net.Uri;
           import android.os.Build;
@@ -171,6 +220,23 @@ jobs:
             }
 
             @PluginMethod
+            public void setCfg(PluginCall call) {
+              SharedPreferences p = getContext().getSharedPreferences("jv", Context.MODE_PRIVATE);
+              String k = call.getString("key", "");
+              String m = call.getString("mem", "[]");
+              p.edit().putString("key", k == null ? "" : k).putString("mem", m == null ? "[]" : m).apply();
+              call.resolve();
+            }
+
+            @PluginMethod
+            public void getCfg(PluginCall call) {
+              SharedPreferences p = getContext().getSharedPreferences("jv", Context.MODE_PRIVATE);
+              JSObject r = new JSObject();
+              r.put("mem", p.getString("mem", "[]"));
+              call.resolve(r);
+            }
+
+            @PluginMethod
             public void take(PluginCall call) {
               JSObject r = new JSObject();
               r.put("pending", JarvisService.hasPending);
@@ -189,21 +255,39 @@ jobs:
           import android.app.NotificationManager;
           import android.app.PendingIntent;
           import android.app.Service;
+          import android.content.Context;
           import android.content.Intent;
+          import android.content.SharedPreferences;
           import android.content.pm.ServiceInfo;
+          import android.hardware.camera2.CameraManager;
+          import android.media.AudioManager;
+          import android.net.Uri;
           import android.os.Build;
           import android.os.Bundle;
           import android.os.Handler;
           import android.os.IBinder;
           import android.os.Looper;
+          import android.provider.AlarmClock;
           import android.speech.RecognitionListener;
           import android.speech.RecognizerIntent;
           import android.speech.SpeechRecognizer;
+          import android.speech.tts.TextToSpeech;
+          import android.speech.tts.UtteranceProgressListener;
+          import java.io.BufferedReader;
+          import java.io.InputStream;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
           import java.text.Normalizer;
+          import java.text.SimpleDateFormat;
           import java.util.ArrayList;
+          import java.util.Date;
           import java.util.Locale;
           import java.util.regex.Matcher;
           import java.util.regex.Pattern;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
 
           public class JarvisService extends Service {
 
@@ -217,9 +301,23 @@ jobs:
 
             private final Handler h = new Handler(Looper.getMainLooper());
             private final Runnable loop = this::startListening;
+            private final Runnable finish = this::finishTurn;
             private SpeechRecognizer sr = null;
             private Intent recIntent;
+            private SharedPreferences prefs;
+            private TextToSpeech tts;
+            private boolean ttsReady = false;
             private boolean running = false;
+            private volatile boolean busy = false;
+            private boolean cmdMode = false;
+            private boolean listenAfter = false;
+            private final ArrayList<String> hist = new ArrayList<String>();
+
+            static class Res {
+              String reply = "Hecho, señor.";
+              JSONArray acts = null;
+              boolean listen = false;
+            }
 
             static String norm(String s) {
               String t = Normalizer.normalize(s.toLowerCase(Locale.ROOT), Normalizer.Form.NFD);
@@ -246,6 +344,7 @@ jobs:
             public void onCreate() {
               super.onCreate();
               inst = this;
+              prefs = getSharedPreferences("jv", MODE_PRIVATE);
               channels();
               try {
                 Notification n = ongoing();
@@ -259,6 +358,24 @@ jobs:
                 return;
               }
               running = true;
+              tts = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
+                public void onInit(int status) {
+                  if (status == TextToSpeech.SUCCESS) {
+                    tts.setLanguage(new Locale("es", "ES"));
+                    tts.setPitch(0.85f);
+                    tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                      public void onStart(String id) {}
+                      public void onDone(String id) {
+                        h.post(finish);
+                      }
+                      public void onError(String id) {
+                        h.post(finish);
+                      }
+                    });
+                    ttsReady = true;
+                  }
+                }
+              });
               recIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
               recIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
               recIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-ES");
@@ -279,6 +396,10 @@ jobs:
               running = false;
               h.removeCallbacksAndMessages(null);
               destroyRec();
+              try {
+                if (tts != null) tts.shutdown();
+              } catch (Exception e) {
+              }
               inst = null;
               super.onDestroy();
             }
@@ -306,7 +427,7 @@ jobs:
             }
 
             void startListening() {
-              if (!running || paused) return;
+              if (!running || paused || busy) return;
               try {
                 if (sr == null) {
                   sr = SpeechRecognizer.createSpeechRecognizer(this);
@@ -320,167 +441,53 @@ jobs:
             }
 
             void wake(String rest) {
-              pending = rest;
-              hasPending = true;
-              paused = true;
               destroyRec();
-              try {
-                Intent i = new Intent(this, MainActivity.class);
-                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-                startActivity(i);
-              } catch (Exception e) {
+              if (rest.length() > 2) {
+                process(rest);
+              } else {
+                speak("Mande señor", true);
               }
-              h.postDelayed(new Runnable() {
+            }
+
+            void speak(String text, boolean la) {
+              listenAfter = la;
+              busy = true;
+              if (text == null || text.trim().isEmpty()) text = "Hecho, señor.";
+              if (!ttsReady) {
+                h.post(finish);
+                return;
+              }
+              tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jv" + System.nanoTime());
+            }
+
+            void finishTurn() {
+              busy = false;
+              if (listenAfter) {
+                listenAfter = false;
+                cmdMode = true;
+                later(150);
+              } else {
+                cmdMode = false;
+                later(300);
+              }
+            }
+
+            void process(final String text) {
+              busy = true;
+              destroyRec();
+              hist.add("Señor: " + text);
+              while (hist.size() > 12) hist.remove(0);
+              if (prefs.getString("key", "").isEmpty()) {
+                speak("Necesito su clave de API, señor. Abra Jarvis y péguela en el engranaje.", false);
+                return;
+              }
+              new Thread(new Runnable() {
                 public void run() {
-                  if (hasPending) wakeNotif();
-                }
-              }, 1500);
-              h.postDelayed(new Runnable() {
-                public void run() {
-                  if (hasPending) {
-                    hasPending = false;
-                    pending = "";
-                    paused = false;
-                    later(300);
-                  }
-                }
-              }, 9000);
-            }
-
-            class Listener implements RecognitionListener {
-              public void onReadyForSpeech(Bundle b) {}
-              public void onBeginningOfSpeech() {}
-              public void onRmsChanged(float v) {}
-              public void onBufferReceived(byte[] b) {}
-              public void onEndOfSpeech() {}
-              public void onPartialResults(Bundle b) {}
-              public void onEvent(int t, Bundle b) {}
-
-              public void onError(int e) {
-                if (e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || e == SpeechRecognizer.ERROR_CLIENT) {
-                  destroyRec();
-                  later(1500);
-                } else {
-                  later(300);
-                }
-              }
-
-              public void onResults(Bundle b) {
-                ArrayList<String> m = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                if (m != null) {
-                  for (String s : m) {
-                    String n = norm(s);
-                    Matcher mt = WAKE.matcher(n);
-                    if (mt.find()) {
-                      wake(n.substring(mt.end()).trim());
-                      return;
-                    }
-                  }
-                }
-                later(250);
-              }
-            }
-
-            private void channels() {
-              if (Build.VERSION.SDK_INT < 26) return;
-              NotificationManager nm = getSystemService(NotificationManager.class);
-              nm.createNotificationChannel(new NotificationChannel("jarvis_bg", "Jarvis escuchando", NotificationManager.IMPORTANCE_LOW));
-              nm.createNotificationChannel(new NotificationChannel("jarvis_wake", "Jarvis avisos", NotificationManager.IMPORTANCE_HIGH));
-            }
-
-            private Notification.Builder builder(String ch) {
-              if (Build.VERSION.SDK_INT >= 26) return new Notification.Builder(this, ch);
-              return new Notification.Builder(this);
-            }
-
-            private PendingIntent openApp() {
-              Intent i = new Intent(this, MainActivity.class);
-              i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-              return PendingIntent.getActivity(this, 0, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-            }
-
-            private Notification ongoing() {
-              Intent s = new Intent(this, JarvisService.class);
-              s.setAction("STOP");
-              PendingIntent sp = PendingIntent.getService(this, 1, s, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-              return builder("jarvis_bg")
-                  .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                  .setContentTitle("Jarvis escuchando")
-                  .setContentText("Di Jarvis desde cualquier app")
-                  .setContentIntent(openApp())
-                  .addAction(0, "Detener", sp)
-                  .setOngoing(true)
-                  .build();
-            }
-
-            private void wakeNotif() {
-              NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-              if (nm == null) return;
-              Notification.Builder b = builder("jarvis_wake")
-                  .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                  .setContentTitle("Jarvis")
-                  .setContentText("Toca para hablar con Jarvis")
-                  .setContentIntent(openApp())
-                  .setFullScreenIntent(openApp(), true)
-                  .setAutoCancel(true);
-              if (Build.VERSION.SDK_INT < 26) b.setPriority(Notification.PRIORITY_HIGH);
-              nm.notify(2, b.build());
-            }
-          }
-          EOF
-          cat > $D/MainActivity.java <<'EOF'
-          package com.jarvis.asistente;
-
-          import android.app.NotificationManager;
-          import android.os.Bundle;
-          import com.getcapacitor.BridgeActivity;
-
-          public class MainActivity extends BridgeActivity {
-            @Override
-            public void onCreate(Bundle savedInstanceState) {
-              registerPlugin(AppLauncherPlugin.class);
-              registerPlugin(BgPlugin.class);
-              super.onCreate(savedInstanceState);
-            }
-
-            @Override
-            public void onResume() {
-              super.onResume();
-              JarvisService.setPaused(true);
-              try {
-                NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                if (nm != null) nm.cancel(2);
-              } catch (Exception e) {
-              }
-              try {
-                final android.webkit.WebView wv = getBridge().getWebView();
-                wv.postDelayed(new Runnable() {
-                  public void run() {
-                    wv.evaluateJavascript("window.jvHide&&jvHide(false);setTimeout(function(){window.jvWake&&jvWake()},500)", null);
-                  }
-                }, 400);
-              } catch (Exception e) {
-              }
-            }
-
-            @Override
-            public void onPause() {
-              super.onPause();
-              JarvisService.setPaused(false);
-              try {
-                getBridge().getWebView().evaluateJavascript("window.jvHide&&jvHide(true)", null);
-              } catch (Exception e) {
-              }
-            }
-          }
-          EOF
-      - name: Compilar APK
-        run: |
-          cd android
-          chmod +x gradlew
-          ./gradlew assembleDebug
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ github.run_number }}
-          name: Jarvis ${{ github.run_number }}
-          files: android/app/build/outputs/apk/debug/app-debug.apk
+                  final Res r = new Res();
+                  try {
+                    String raw = callAI();
+                    JSONObject o;
+                    try {
+                      o = new JSONObject(raw.replace("```json", "").replace("```", "").trim());
+                    } catch (Exception pe) {
+                      o
