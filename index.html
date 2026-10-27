@@ -148,9 +148,9 @@ function run(n,o){
     setTimeout(()=>say('Señor, han pasado '+k+' '+u+'.'),ms);
     return say('Listo, le aviso en '+k+' '+u+'. Mantenga esta pantalla abierta.');
   }
-  if(m=n.match(/^(?:recuerda|apunta|anota)(?: que)?\s+(.+)/)){const i=n.indexOf(m[1]);mem.push(o.slice(i).trim());store.set('jv.mem',mem);return say('Anotado, señor.')}
+  if(m=n.match(/^(?:recuerda|apunta|anota)(?: que)?\s+(.+)/)){const i=n.indexOf(m[1]);mem.push(o.slice(i).trim());store.set('jv.mem',mem);syncCfg();return say('Anotado, señor.')}
   if(/que recuerdas|que sabes de mi|mi memoria/.test(n))return say(mem.length?'Recuerdo esto: '+mem.join('. ')+'.':'Aún no me ha pedido recordar nada.');
-  if(/olvida todo|borra la memoria/.test(n)){mem=[];store.set('jv.mem',mem);return say('Memoria borrada.')}
+  if(/olvida todo|borra la memoria/.test(n)){mem=[];store.set('jv.mem',mem);syncCfg();return say('Memoria borrada.')}
   if(NATIVE&&(m=n.match(/^(?:abre|abrir|abreme|ejecuta|inicia|lanza)\s+(?:la\s+|el\s+)?(?:app\s+|aplicacion\s+)?(.+)/))){
     const nm=m[1].trim();
     openApp(nm).then(r=>{
@@ -174,7 +174,7 @@ function run(n,o){
 const MODEL='claude-haiku-5-5';
 function getKey(force){
   let k=store.get('jv.key','');
-  if(!k||force){const v=window.prompt('Pega tu clave de API: Gemini (gratis) o Anthropic (sk-ant-)',k||'');if(v!==null&&v.trim()){k=v.trim();store.set('jv.key',k)}}
+  if(!k||force){const v=window.prompt('Pega tu clave de API: Gemini (gratis) o Anthropic (sk-ant-)',k||'');if(v!==null&&v.trim()){k=v.trim();store.set('jv.key',k);syncCfg()}}
   return k;
 }
 async function openApp(name){
@@ -186,7 +186,7 @@ function act(a){
   if(a.type==='open'&&/^https?:\/\//.test(a.url))openUrl(a.url,a.url.replace(/^https?:\/\/(www\.)?/,'').split('/')[0]);
   else if(a.type==='timer'&&a.seconds>0)setTimeout(()=>say('Señor, '+(a.message||'se acabó el tiempo')+'.'),a.seconds*1000);
   else if(a.type==='app'&&a.name)openApp(a.name).then(r=>{if(!(r&&r.ok))note('No encontré la aplicación '+a.name)});
-  else if(a.type==='remember'&&a.text){mem.push(a.text);store.set('jv.mem',mem)}
+  else if(a.type==='remember'&&a.text){mem.push(a.text);store.set('jv.mem',mem);syncCfg()}
 }
 async function ask(text){
   const key=getKey();
@@ -244,6 +244,8 @@ sw.onchange=async()=>{
     active=true;
     if(NATIVE){
       try{await NSR.requestPermissions()}catch(e){}
+      await syncCfg();
+      if(!store.get('jv.key',''))note('Para que Jarvis piense en segundo plano falta su clave: toque ⚙ y péguela.');
       try{
         const r=await getBg().start();
         if(r&&r.needNotif)note('Permita las notificaciones de Jarvis y luego apague y encienda este interruptor.');
@@ -259,7 +261,7 @@ sw.onchange=async()=>{
     if(!awaiting)stopRec();state('idle','En reposo');
   }
 };
-function jvHide(h){HIDDEN=h;if(h){stopRec()}else if(active||awaiting){startRec()}}
+function jvHide(h){HIDDEN=h;if(!h)syncCfg();if(h){stopRec()}else if(active||awaiting){startRec()}}
 window.jvHide=jvHide;
 document.addEventListener('visibilitychange',()=>jvHide(document.hidden));
 async function jvWake(){
@@ -272,7 +274,18 @@ async function jvWake(){
   }catch(e){}
 }
 window.jvWake=jvWake;
+async function syncCfg(){
+  if(!NATIVE)return;
+  try{
+    const bg=getBg();
+    const r=await bg.getCfg();
+    let nm=[];try{nm=JSON.parse(r.mem||'[]')}catch(e){}
+    mem=[...new Set([...mem,...nm])];store.set('jv.mem',mem);
+    await bg.setCfg({key:store.get('jv.key',''),mem:JSON.stringify(mem)});
+  }catch(e){}
+}
 setTimeout(jvWake,1200);
+setTimeout(syncCfg,1500);
 
 </script>
 </body>
