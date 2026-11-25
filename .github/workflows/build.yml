@@ -247,47 +247,29 @@ jobs:
             }
           }
           EOF
+          sed -i 's#</manifest>#<uses-permission android:name="android.permission.READ_CONTACTS"/></manifest>#' $M
           cat > $D/JarvisService.java <<'EOF'
           package com.jarvis.asistente;
 
           import android.app.Notification;
           import android.app.NotificationChannel;
           import android.app.NotificationManager;
-          import android.app.PendingIntent;
           import android.app.Service;
-          import android.content.Context;
           import android.content.Intent;
-          import android.content.SharedPreferences;
           import android.content.pm.ServiceInfo;
-          import android.hardware.camera2.CameraManager;
-          import android.media.AudioManager;
-          import android.net.Uri;
           import android.os.Build;
           import android.os.Bundle;
           import android.os.Handler;
           import android.os.IBinder;
           import android.os.Looper;
-          import android.provider.AlarmClock;
           import android.speech.RecognitionListener;
           import android.speech.RecognizerIntent;
           import android.speech.SpeechRecognizer;
-          import android.speech.tts.TextToSpeech;
-          import android.speech.tts.UtteranceProgressListener;
-          import java.io.BufferedReader;
-          import java.io.InputStream;
-          import java.io.InputStreamReader;
-          import java.io.OutputStream;
-          import java.net.HttpURLConnection;
-          import java.net.URL;
           import java.text.Normalizer;
-          import java.text.SimpleDateFormat;
           import java.util.ArrayList;
-          import java.util.Date;
           import java.util.Locale;
           import java.util.regex.Matcher;
           import java.util.regex.Pattern;
-          import org.json.JSONArray;
-          import org.json.JSONObject;
 
           public class JarvisService extends Service {
 
@@ -301,23 +283,9 @@ jobs:
 
             private final Handler h = new Handler(Looper.getMainLooper());
             private final Runnable loop = this::startListening;
-            private final Runnable finish = this::finishTurn;
             private SpeechRecognizer sr = null;
             private Intent recIntent;
-            private SharedPreferences prefs;
-            private TextToSpeech tts;
-            private boolean ttsReady = false;
             private boolean running = false;
-            private volatile boolean busy = false;
-            private boolean cmdMode = false;
-            private boolean listenAfter = false;
-            private final ArrayList<String> hist = new ArrayList<String>();
-
-            static class Res {
-              String reply = "Hecho, señor.";
-              JSONArray acts = null;
-              boolean listen = false;
-            }
 
             static String norm(String s) {
               String t = Normalizer.normalize(s.toLowerCase(Locale.ROOT), Normalizer.Form.NFD);
@@ -344,10 +312,18 @@ jobs:
             public void onCreate() {
               super.onCreate();
               inst = this;
-              prefs = getSharedPreferences("jv", MODE_PRIVATE);
-              channels();
               try {
-                Notification n = ongoing();
+                NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                Notification.Builder b;
+                if (Build.VERSION.SDK_INT >= 26) {
+                  nm.createNotificationChannel(new NotificationChannel("jv", "Jarvis", NotificationManager.IMPORTANCE_LOW));
+                  b = new Notification.Builder(this, "jv");
+                } else {
+                  b = new Notification.Builder(this);
+                }
+                b.setContentTitle("Jarvis escuchando").setContentText("Diga Jarvis y su orden")
+                    .setSmallIcon(android.R.drawable.ic_btn_speak_now).setOngoing(true);
+                Notification n = b.build();
                 if (Build.VERSION.SDK_INT >= 29) {
                   startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
                 } else {
@@ -358,24 +334,6 @@ jobs:
                 return;
               }
               running = true;
-              tts = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
-                public void onInit(int status) {
-                  if (status == TextToSpeech.SUCCESS) {
-                    tts.setLanguage(new Locale("es", "ES"));
-                    tts.setPitch(0.85f);
-                    tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-                      public void onStart(String id) {}
-                      public void onDone(String id) {
-                        h.post(finish);
-                      }
-                      public void onError(String id) {
-                        h.post(finish);
-                      }
-                    });
-                    ttsReady = true;
-                  }
-                }
-              });
               recIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
               recIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
               recIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-ES");
@@ -385,9 +343,7 @@ jobs:
 
             @Override
             public int onStartCommand(Intent i, int flags, int startId) {
-              if (i != null && "STOP".equals(i.getAction())) {
-                stopSelf();
-              }
+              if (i != null && "STOP".equals(i.getAction())) stopSelf();
               return START_NOT_STICKY;
             }
 
@@ -396,10 +352,6 @@ jobs:
               running = false;
               h.removeCallbacksAndMessages(null);
               destroyRec();
-              try {
-                if (tts != null) tts.shutdown();
-              } catch (Exception e) {
-              }
               inst = null;
               super.onDestroy();
             }
@@ -427,7 +379,7 @@ jobs:
             }
 
             void startListening() {
-              if (!running || paused || busy) return;
+              if (!running || paused) return;
               try {
                 if (sr == null) {
                   sr = SpeechRecognizer.createSpeechRecognizer(this);
@@ -440,54 +392,91 @@ jobs:
               }
             }
 
-            void wake(String rest) {
-              destroyRec();
-              if (rest.length() > 2) {
-                process(rest);
-              } else {
-                speak("Mande señor", true);
+            void openApp() {
+              Intent i = new Intent(this, MainActivity.class);
+              i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+              try {
+                startActivity(i);
+              } catch (Exception e) {
+                later(1500);
               }
             }
 
-            void speak(String text, boolean la) {
-              listenAfter = la;
-              busy = true;
-              if (text == null || text.trim().isEmpty()) text = "Hecho, señor.";
-              if (!ttsReady) {
-                h.post(finish);
-                return;
-              }
-              tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jv" + System.nanoTime());
-            }
+            class Listener implements RecognitionListener {
+              public void onReadyForSpeech(Bundle b) {}
+              public void onBeginningOfSpeech() {}
+              public void onRmsChanged(float v) {}
+              public void onBufferReceived(byte[] b) {}
+              public void onEndOfSpeech() {}
+              public void onPartialResults(Bundle b) {}
+              public void onEvent(int t, Bundle b) {}
 
-            void finishTurn() {
-              busy = false;
-              if (listenAfter) {
-                listenAfter = false;
-                cmdMode = true;
-                later(150);
-              } else {
-                cmdMode = false;
+              public void onError(int e) {
+                destroyRec();
+                later(e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ? 2000 : 700);
+              }
+
+              public void onResults(Bundle b) {
+                ArrayList<String> r = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                if (r != null) {
+                  for (String s : r) {
+                    String n = norm(s);
+                    Matcher m = WAKE.matcher(n);
+                    if (m.find()) {
+                      pending = n.substring(m.end()).trim();
+                      hasPending = true;
+                      destroyRec();
+                      openApp();
+                      return;
+                    }
+                  }
+                }
                 later(300);
               }
             }
+          }
+          EOF
+          cat > $D/DeviceControlPlugin.java <<'EOF'
+          package com.jarvis.asistente;
 
-            void process(final String text) {
-              busy = true;
-              destroyRec();
-              hist.add("Señor: " + text);
-              while (hist.size() > 12) hist.remove(0);
-              if (prefs.getString("key", "").isEmpty()) {
-                speak("Necesito su clave de API, señor. Abra Jarvis y péguela en el engranaje.", false);
-                return;
-              }
-              new Thread(new Runnable() {
-                public void run() {
-                  final Res r = new Res();
-                  try {
-                    String raw = callAI();
-                    JSONObject o;
-                    try {
-                      o = new JSONObject(raw.replace("```json", "").replace("```", "").trim());
-                    } catch (Exception pe) {
-                      o
+          import android.Manifest;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.database.Cursor;
+          import android.hardware.camera2.CameraManager;
+          import android.media.AudioManager;
+          import android.net.Uri;
+          import android.os.BatteryManager;
+          import android.provider.AlarmClock;
+          import android.provider.ContactsContract;
+          import android.provider.Settings;
+          import android.view.KeyEvent;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+
+          @CapacitorPlugin(name = "DeviceControl")
+          public class DeviceControlPlugin extends Plugin {
+
+            private JSObject res(boolean ok, String msg) {
+              JSObject r = new JSObject();
+              r.put("ok", ok);
+              r.put("msg", msg);
+              return r;
+            }
+
+            private void go(Intent i) {
+              i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+              getContext().startActivity(i);
+            }
+
+            // Devuelve el numero, "" si se pidio permiso, o null si no existe el contacto
+            private String phone(String who) {
+              if (who == null) return null;
+              String digits = who.replaceAll("[^0-9+]", "");
+      
