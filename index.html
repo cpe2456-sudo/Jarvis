@@ -141,10 +141,12 @@ function run(n,o){
   let m;
   if(/^(hola|buenas|buenos dias|buenas tardes|buenas noches)/.test(n))return say('A su servicio, señor.');
   if(/quien eres|como te llamas/.test(n))return say('Soy Jarvis, su asistente personal.');
+  if(NATIVE&&/bateria/.test(n))return dev({type:'battery'},true);
   if(/que hora|la hora/.test(n))return say('Son las '+new Date().toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'})+', señor.');
   if(/que dia|la fecha|dia es hoy/.test(n))return say('Hoy es '+new Date().toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long',year:'numeric'})+'.');
   if(/temporizador|alarma|avisame|cuenta atras/.test(n)&&(m=n.match(/(\d+)\s*(segundo|minuto|hora)/))){
     const k=+m[1],u=m[2]+(k>1?'s':''),ms=k*{segundo:1e3,minuto:6e4,hora:36e5}[m[2]];
+    if(NATIVE){dev({type:'timer',seconds:Math.round(ms/1000),message:'Han pasado '+k+' '+u});return say('Listo, le aviso en '+k+' '+u+'.')}
     setTimeout(()=>say('Señor, han pasado '+k+' '+u+'.'),ms);
     return say('Listo, le aviso en '+k+' '+u+'. Mantenga esta pantalla abierta.');
   }
@@ -181,9 +183,15 @@ async function openApp(name){
   try{const AL=(Capacitor.Plugins&&Capacitor.Plugins.AppLauncher)||Capacitor.registerPlugin('AppLauncher');return await AL.open({name})}catch(e){return null}
 }
 const WEB={youtube:'youtube.com',google:'google.com',maps:'maps.google.com',whatsapp:'web.whatsapp.com',gmail:'mail.google.com',spotify:'open.spotify.com',instagram:'instagram.com',facebook:'facebook.com',tiktok:'tiktok.com'};
+const DEVT=['call','sms','alarm','timer','flashlight','volume','media','settings','maps','battery'];
+function dev(a,sp){
+  try{const D=(Capacitor.Plugins&&Capacitor.Plugins.DeviceControl)||Capacitor.registerPlugin('DeviceControl');
+  return D.run(a).then(r=>{if(r&&r.msg){sp?say(r.msg):note(r.msg)}}).catch(e=>note('No pude ejecutar la acción: '+((e&&e.message)||e)))}catch(e){note('Acción no disponible.')}
+}
 function act(a){
   if(!a)return;
   if(a.type==='open'&&/^https?:\/\//.test(a.url))openUrl(a.url,a.url.replace(/^https?:\/\/(www\.)?/,'').split('/')[0]);
+  else if(NATIVE&&DEVT.includes(a.type))dev(a);
   else if(a.type==='timer'&&a.seconds>0)setTimeout(()=>say('Señor, '+(a.message||'se acabó el tiempo')+'.'),a.seconds*1000);
   else if(a.type==='app'&&a.name)openApp(a.name).then(r=>{if(!(r&&r.ok))note('No encontré la aplicación '+a.name)});
   else if(a.type==='remember'&&a.text){mem.push(a.text);store.set('jv.mem',mem);syncCfg()}
@@ -194,9 +202,9 @@ async function ask(text){
   state('think','Pensando…');
   let prov='',reply=null,acts=[];
   const hist=chat.slice(-13,-1).map(m=>(m.who==='u'?'Señor: ':'Jarvis: ')+m.text).join('\n');
-  const prompt='Eres Jarvis, el asistente personal por voz del señor (como el de Iron Man). Responde SIEMPRE en español, con trato respetuoso y breve (1 a 3 frases, se leerá en voz alta, sin markdown ni emojis), salvo que pida un resumen o algo largo: entonces sé completo pero compacto. Contesta cualquier pregunta o petición lo mejor que puedas; si te piden algo que no puedes hacer (llamar, enviar mensajes, controlar el teléfono), dilo con honestidad y ofrece la alternativa más cercana. '+
+  const prompt='Eres Jarvis, el asistente personal por voz del señor (como el de Iron Man). Responde SIEMPRE en español, con trato respetuoso y breve (1 a 3 frases, se leerá en voz alta, sin markdown ni emojis), salvo que pida un resumen o algo largo: entonces sé completo pero compacto. Contesta cualquier pregunta o petición lo mejor que puedas; si te piden algo que no puedes hacer (tocar botones dentro de otras apps), dilo con honestidad y ofrece la alternativa más cercana. '+
   'Fecha y hora actual: '+new Date().toLocaleString('es-ES')+'.\nCosas que el señor te pidió recordar: '+(mem.join('; ')||'ninguna')+'.\nConversación reciente:\n'+hist+'\n\nÚltima orden del señor: '+text+'\n\n'+
-  'Devuelve SOLO un JSON, sin texto extra ni bloques de código, con esta forma: {"reply":"lo que dirás en voz alta","actions":[]}. Acciones posibles dentro de actions: {"type":"open","url":"https://..."} para abrir una página, {"type":"timer","seconds":300,"message":"texto del aviso"} para un aviso, {"type":"remember","text":"dato"} para guardar algo en la memoria, {"type":"app","name":"Roblox"} para abrir cualquier aplicación instalada en el celular por su nombre (SÍ puedes abrir aplicaciones: usa esta acción y responde brevemente). Usa actions vacío si no hace falta ninguna.';
+  'Devuelve SOLO un JSON, sin texto extra ni bloques de código, con esta forma: {"reply":"lo que dirás en voz alta","actions":[]}. Acciones posibles dentro de actions: {"type":"open","url":"https://..."} para abrir una página, {"type":"timer","seconds":300,"message":"texto del aviso"} para un aviso, {"type":"remember","text":"dato"} para guardar algo en la memoria, {"type":"app","name":"Roblox"} para abrir cualquier aplicación instalada en el celular por su nombre (SÍ puedes abrir aplicaciones: usa esta acción y responde brevemente). También puedes: {"type":"call","to":"nombre o número"} abrir el marcador para llamar, {"type":"sms","to":"nombre o número","text":"mensaje"} dejar listo un SMS (el señor toca enviar), {"type":"alarm","hour":7,"minute":30,"message":"texto"} alarma real del reloj, {"type":"flashlight","on":true} linterna, {"type":"volume","direction":"up|down|mute|max"}, {"type":"media","action":"play|next|prev"} controlar la música, {"type":"settings","page":"wifi|bluetooth|sound|display"}, {"type":"maps","query":"lugar"} abrir mapas. Los temporizadores (timer) suenan aunque la app esté cerrada. En to pon siempre texto. Usa actions vacío si no hace falta ninguna.';
   try{
     const ant=key.startsWith('sk-ant');prov=ant?'Anthropic':'Google';
     const url=ant?'https://api.anthropic.com/v1/messages':'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent';
